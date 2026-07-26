@@ -20,6 +20,11 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
+⚠️ **先 `rustup update stable`**：CI 装的是最新 stable，新版 clippy 的 lint 更严。
+本地工具链落后就会出现"本地全绿、CI 全红"（曾因落后 7 个小版本踩过）。
+另外 PowerShell 里 `cargo ... | Select-String` 之后的 `$LASTEXITCODE` 是
+**管道最后一个命令**的退出码，会掩盖 cargo 的失败——判断成败要用 `*> $null` 重定向。
+
 CI 在 Windows/Linux/macOS 三平台跑。发布：推 `v*` 标签即触发 `release.yml`
 交叉构建四个产物并自动建 GitHub Release，**不要手工传附件**。
 

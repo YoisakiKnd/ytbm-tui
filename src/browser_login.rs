@@ -318,8 +318,7 @@ fn explain_failure(spec: &str, stderr: &str) -> String {
     } else {
         let tail: String = stderr
             .lines()
-            .filter(|l| l.contains("ERROR") || l.contains("error"))
-            .next_back()
+            .rfind(|l| l.contains("ERROR") || l.contains("error"))
             .unwrap_or("未知错误")
             .chars()
             .take(160)
