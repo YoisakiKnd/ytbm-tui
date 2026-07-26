@@ -1,0 +1,220 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Config {
+    pub playback: Playback,
+    pub sponsorblock: SponsorBlock,
+    pub lyrics: Lyrics,
+    /// Optional global-key overrides, e.g. `next = "b"`; see [`parse_key`].
+    pub keys: HashMap<String, String>,
+    /// yt-dlp path resolved at startup - not read from the config file.
+    #[serde(skip)]
+    pub ytdlp_path: Option<String>,
+}
+
+/// Parse a config key string into a crossterm KeyCode.
+/// Accepts a single character or the named keys below.
+pub fn parse_key(s: &str) -> Option<ratatui::crossterm::event::KeyCode> {
+    use ratatui::crossterm::event::KeyCode;
+    let lower = s.trim().to_ascii_lowercase();
+    Some(match lower.as_str() {
+        "space" => KeyCode::Char(' '),
+        "tab" => KeyCode::Tab,
+        "enter" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        _ => {
+            let mut chars = s.trim().chars();
+            let c = chars.next()?;
+            if chars.next().is_some() {
+                return None; // multi-char & not a named key
+            }
+            KeyCode::Char(c)
+        }
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Playback {
+    pub mpv_path: String,
+    pub volume: i64,
+    pub radio_auto: bool,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            mpv_path: "mpv".into(),
+            volume: 70,
+            radio_auto: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SponsorBlock {
+    pub enabled: bool,
+    pub categories: Vec<String>,
+}
+
+impl Default for SponsorBlock {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            categories: vec![
+                "sponsor".into(),
+                "selfpromo".into(),
+                "interaction".into(),
+                "music_offtopic".into(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lyrics {
+    pub enabled: bool,
+}
+
+impl Default for Lyrics {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+pub struct Dirs {
+    pub config_dir: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+/// Locate an external tool without relying on the session PATH (freshly
+/// installed scoop/winget tools are only on the PATH of *new* terminals).
+/// Returns the first candidate that answers `--version`.
+pub fn resolve_tool(configured: &str, exe_name: &str, scoop_pkg: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if configured != exe_name {
+        candidates.push(configured.to_string()); // explicit config path first
+    }
+    candidates.push(exe_name.to_string()); // PATH
+    if let Some(root) = scoop_root() {
+        candidates.push(
+            root.join("apps")
+                .join(scoop_pkg)
+                .join("current")
+                .join(format!("{exe_name}.exe"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        candidates.push(
+            root.join("shims")
+                .join(format!("{exe_name}.exe"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        candidates.push(format!("{pf}\\{exe_name}\\{exe_name}.exe"));
+    }
+    if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+        // winget symlink directory (usually on PATH, but be thorough)
+        candidates.push(format!("{lad}\\Microsoft\\WinGet\\Links\\{exe_name}.exe"));
+    }
+    candidates.into_iter().find(|c| probe_version(c))
+}
+
+pub fn scoop_root() -> Option<PathBuf> {
+    if let Ok(s) = std::env::var("SCOOP") {
+        let p = PathBuf::from(s);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Derive from a "..\scoop\shims" PATH entry (covers non-default roots).
+    if let Ok(path) = std::env::var("PATH") {
+        for p in std::env::split_paths(&path) {
+            if p.ends_with("scoop\\shims") || p.ends_with("scoop/shims") {
+                if let Some(root) = p.parent() {
+                    return Some(root.to_path_buf());
+                }
+            }
+        }
+    }
+    let home = std::env::var("USERPROFILE").ok()?;
+    let p = PathBuf::from(home).join("scoop");
+    p.exists().then_some(p)
+}
+
+pub fn probe_version(exe: &str) -> bool {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    matches!(cmd.status(), Ok(s) if s.success())
+}
+
+pub fn project_dirs() -> Result<Dirs> {
+    let pd = ProjectDirs::from("", "", "ytbm-tui")
+        .context("cannot determine platform config directory")?;
+    Ok(Dirs {
+        config_dir: pd.config_dir().to_path_buf(),
+        data_dir: pd.data_dir().to_path_buf(),
+    })
+}
+
+/// Load config.toml from the platform config dir; write a commented default
+/// file on first run so users can discover the options.
+pub fn load(dirs: &Dirs) -> Result<Config> {
+    let path = dirs.config_dir.join("config.toml");
+    if !path.exists() {
+        std::fs::create_dir_all(&dirs.config_dir)?;
+        std::fs::write(&path, DEFAULT_CONFIG_TOML)?;
+        return Ok(Config::default());
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(cfg)
+}
+
+const DEFAULT_CONFIG_TOML: &str = r#"# ytbm-tui 配置文件
+
+[playback]
+mpv_path = "mpv"     # mpv 不在 PATH 时可写绝对路径
+volume = 70
+radio_auto = true    # 队列快播完时自动补充电台歌曲
+
+[sponsorblock]
+enabled = true
+categories = ["sponsor", "selfpromo", "interaction", "music_offtopic"]
+
+[lyrics]
+enabled = true
+
+[keys]
+# 可选全局键位覆盖。可用动作名:
+#   quit, search, help, focus, play_pause, next, prev, seek_back, seek_fwd,
+#   vol_down, vol_up, repeat, radio, shuffle, lyrics, restart_player
+# 取值: 单个字符, 或 space/tab/enter/esc/left/right/up/down
+# 示例:
+# next = "b"
+# play_pause = "space"
+"#;
