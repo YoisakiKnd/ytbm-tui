@@ -7,9 +7,21 @@
 
 ```powershell
 cargo build            # 调试构建
-cargo test             # 单测集中在 player/queue.rs、lyrics.rs、sponsorblock.rs
+cargo test             # 纯逻辑 + TestBackend 渲染测试，不联网
+cargo test -- --ignored # 冒烟测试，真实请求 YouTube/LRCLIB/SponsorBlock
 cargo build --release  # 发布（lto+strip，单 exe）
 ```
+
+**提交前必须过 CI 的三道关**（`.github/workflows/ci.yml` 用 `-D warnings`）：
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+```
+
+CI 在 Windows/Linux/macOS 三平台跑。发布：推 `v*` 标签即触发 `release.yml`
+交叉构建四个产物并自动建 GitHub Release，**不要手工传附件**。
 
 运行依赖外部程序：`winget install mpv yt-dlp`（mpv 必需，yt-dlp 用于解析播放地址）。
 
