@@ -1,19 +1,31 @@
 # ytbm-tui
 
+[![CI](https://github.com/YoisakiKnd/ytbm-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/YoisakiKnd/ytbm-tui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/YoisakiKnd/ytbm-tui)](https://github.com/YoisakiKnd/ytbm-tui/releases/latest)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+
 轻量级 YouTube Music 终端客户端（TUI）。单个可执行文件，运行内存 ~15MB，
 替代内存动辄数百 MB 的官方 Electron/浏览器方案。
 
 ```
+ 首页 Esc  搜索 /  音乐库 L  正在播放 l              ? 帮助  q 退出
 ┌ 首页 ───────────────────────────────────────┬ 队列 12 ─────────┐
-│ 热门歌曲 ─────────────────────────────────── │ > 晴天    周杰伦  │
+│ 热门歌曲 ----------------------------------- │ > 晴天    周杰伦  │
 │ >  1 Golden              HUNTR/X       3:20 │   七里香  周杰伦  │
 │    2 Soda Pop            Saja Boys     2:46 │   稻香    周杰伦  │
-│ 新专辑 ───────────────────────────────────── │                  │
-│    ALB The Life of a Sh… Taylor Swift  2025 │                  │
+│ 新专辑 ------------------------------------- │                  │
+│    ALB The Life of a Sh.. Taylor Swift 2025 │                  │
 ├─────────────────────────────────────────────┴──────────────────┤
-│ >  晴天 — 周杰伦    1:23 ━━━━●───────── 4:29  vol 70%  RPT RADIO│
+│ >  晴天 - 周杰伦    1:23 ----●--------- 4:29  vol 70%  RPT RADIO│
 └────────────────────────────────────────────────────────────────┘
 ```
+
+顶部导航栏显示当前位置与到达各页面的按键，可直接点击切换。
+
+## 下载
+
+到 [Releases](https://github.com/YoisakiKnd/ytbm-tui/releases/latest) 下载对应平台的
+压缩包（Windows / Linux / macOS Intel / macOS Apple Silicon），解压即用。
 
 ## 特性
 
@@ -41,12 +53,24 @@ scoop install mpv yt-dlp
 > 装完不必重开终端。新版 yt-dlp 需要 JS 运行时（deno 或 node）解 YouTube
 > 挑战：已有 node 的话在 yt-dlp.conf 加一行 `--js-runtimes node` 即可。
 
-构建本程序（需要 [Rust 工具链](https://rustup.rs/)）：
+从源码构建（需要 [Rust 工具链](https://rustup.rs/)）：
 
 ```powershell
 cargo build --release
 # 产物: target\release\ytbm-tui.exe，单文件可任意拷贝
 ```
+
+## 开发
+
+```powershell
+cargo test                 # 纯逻辑 + 渲染测试，不联网
+cargo test -- --ignored    # 冒烟测试，会真实请求 YouTube/LRCLIB/SponsorBlock
+cargo clippy --all-targets -- -D warnings
+```
+
+CI（`.github/workflows/ci.yml`）在三大平台跑 fmt + clippy + test + release 构建；
+推送 `v*` 标签会触发 `release.yml` 交叉构建四个平台产物并自动创建 GitHub Release。
+项目约定见 [CLAUDE.md](CLAUDE.md)。
 
 ## 登录（访问个人音乐库）
 
