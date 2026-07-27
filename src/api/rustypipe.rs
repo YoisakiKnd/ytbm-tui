@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use rustypipe::client::{RustyPipe, RustyPipeQuery};
 use rustypipe::error::Error as RpError;
 use rustypipe::model::{AlbumItem, ArtistId, ArtistItem, MusicPlaylistItem, TrackItem};
+use rustypipe::param::StreamFilter;
 
 use super::models::{
     AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, PlaylistDetail, PlaylistSummary,
@@ -230,6 +231,28 @@ impl MusicApi for RustyPipeApi {
         // The first item is usually the seed track itself; the queue layer
         // dedupes by videoId, so it is safe to pass everything through.
         Ok(r.items.into_iter().map(conv_track).collect())
+    }
+
+    async fn stream_url(&self, video_id: &str) -> Result<String> {
+        // `player` picks its own client order. Without a botguard binary that
+        // order is [Ios, Tv] - and `ClientType::needs_po_token` covers only
+        // Desktop/DesktopMusic/Mobile, so neither needs a PO token. Ios also
+        // reports `needs_deobf() == false` (unobfuscated URLs), so the common
+        // path does not even run the base.js deobfuscation.
+        let player = self.query.player(video_id).await?;
+        // Default filter = highest-quality audio, which for music is the
+        // ~160kbps Opus stream.
+        let stream = player
+            .select_audio_stream(&StreamFilter::new())
+            .context("该曲目没有可用的音频流")?;
+        tracing::debug!(
+            "resolved stream: itag={} codec={:?} bitrate={} client={:?}",
+            stream.itag,
+            stream.codec,
+            stream.bitrate,
+            player.client_type
+        );
+        Ok(stream.url.clone())
     }
 
     async fn plain_lyrics(&self, video_id: &str) -> Result<Option<String>> {

@@ -8,7 +8,7 @@
 替代内存动辄数百 MB 的官方 Electron/浏览器方案。
 
 ```
- 首页 Esc  搜索 /  音乐库 L  正在播放 l              ? 帮助  q 退出
+ 首页 Esc  搜索 /  音乐库 L  历史 H  正在播放 l       ? 帮助  q 退出
 ┌ 首页 ───────────────────────────────────────┬ 队列 12 ─────────┐
 │ 热门歌曲 ----------------------------------- │ > 晴天    周杰伦  │
 │ >  1 Golden              HUNTR/X       3:20 │   七里香  周杰伦  │
@@ -29,7 +29,8 @@
 
 ## 特性
 
-- **无广告播放**：音频流经 yt-dlp 直接提取，流中天然不含广告（广告由官方客户端注入）
+- **无广告播放**：程序自己解析音频直链（进程内完成，无需 yt-dlp / deno / node），
+  流中天然不含广告（广告由官方客户端注入）
 - **浏览器一键登录**：自动检测已装浏览器，选中即导入登录身份，无需复制粘贴；登录后可访问 喜欢的音乐 / 我的歌单 / 收藏专辑 / 关注歌手 / 播放历史，凭据只存本机
 - **首页推荐**：打开即见排行榜热门歌曲与新发行专辑
 - **SponsorBlock**：自动跳过 MV 音源中的非音乐片段（口播/片头/片尾），社区数据驱动
@@ -39,19 +40,26 @@
 - **同步歌词**：LRCLIB 逐行滚动高亮，无同步歌词时回退 YT Music 文本歌词
 - **电台续播**：队列快播完时自动追加相似歌曲（可开关）
 - **完整队列**：插播/下一首/移除/排序/打乱，循环三模式（关/全部/单曲）
+- **本地播放会话**：自动保存队列、循环模式和播放位置，重启后可继续上次播放；不保存带凭据的直链
+- **本地播放历史**：保存最近 100 首歌曲，支持从历史页面直接重新播放，不依赖登录或网络
 - **鼠标支持**：点击选中、双击播放、滚轮滚动、点击进度条跳转、点击分类页签
 
 ## 安装
 
-依赖两个外部程序（音频引擎 + 流解析），scoop 或 winget 任选：
+只依赖一个外部程序——mpv（音频引擎），scoop 或 winget 任选：
 
 ```powershell
-scoop install mpv yt-dlp
+scoop install mpv
 ```
 
-> 程序会自动在 PATH、scoop、Program Files 中寻找 mpv/yt-dlp，
-> 装完不必重开终端。新版 yt-dlp 需要 JS 运行时（deno 或 node）解 YouTube
-> 挑战：已有 node 的话在 yt-dlp.conf 加一行 `--js-runtimes node` 即可。
+> 播放地址由程序自己解析，不需要 yt-dlp，也不需要 yt-dlp 所要求的
+> JS 运行时（deno / node）。
+>
+> yt-dlp 是**可选**的：仅在程序自身解析播放地址失败时作为 mpv 的兜底。
+> 不装也能正常听歌和导入浏览器登录；若 Chromium 因加密限制无法导入，改用
+> Firefox 或手动粘贴 Cookie。
+>
+> 程序会自动在 PATH、scoop、Program Files 中寻找 mpv，装完不必重开终端。
 
 从源码构建（需要 [Rust 工具链](https://rustup.rs/)）：
 
@@ -83,15 +91,21 @@ CI（`.github/workflows/ci.yml`）在三大平台跑 fmt + clippy + test + relea
 [手动] 手动粘贴 Cookie 或 cookies.txt 路径
 ```
 
-**一键登录**：确保该浏览器里已登录 YouTube，选中它按 Enter 即可——底层用 yt-dlp
-读取浏览器中已有的登录身份，全程离线、无需复制粘贴。浏览器还没登录的话，
+**一键登录**：确保该浏览器里已登录 YouTube，选中它按 Enter 即可——程序会直接读取
+浏览器本机的 Cookie 数据库，全程离线、无需复制粘贴，也不依赖 yt-dlp。浏览器还没登录的话，
 先选「打开网页」登录，回来再导入。
 
-失败时的常见原因：Chrome 系浏览器需先**完全关闭**才能解密 Cookie 数据库
-（Firefox 无此限制）；实在读不出来就用「手动粘贴」兜底（浏览器扩展
-「Get cookies.txt LOCALLY」导出后粘贴文件路径即可）。
+失败时的常见原因：**Chrome 127+ 启用了 App-Bound Encryption，把密钥绑定到
+Chrome 自身进程，外部程序无法解密**。Firefox 的 Cookie 库是明文的，可以正常导入。
+读不出来就用「手动粘贴」兜底（浏览器扩展「Get cookies.txt LOCALLY」
+导出后粘贴文件路径即可）。
 
-登录信息保存在本机数据目录，重启免登录；音乐库页按 `x` 登出。
+登录信息保存在本机数据目录，重启免登录；播放会话和本地播放历史也保存在同一数据目录：
+
+- `playback-session.json`：队列、当前曲目、播放位置和播放模式
+- `playback-history.json`：最近 100 首本地播放记录
+
+上述文件不保存带凭据的播放直链。音乐库页按 `x` 登出。
 注意 YouTube 会轮换 Cookie，若长时间后接口报错，重新导入一次即可。
 
 ## 快捷键
@@ -100,9 +114,10 @@ CI（`.github/workflows/ci.yml`）在三大平台跑 fmt + clippy + test + relea
 |---|---|
 | `/` | 搜索 |
 | `L` | 音乐库（登录入口） |
+| `H` | 本地播放历史 |
 | `1-4` / `[` `]` | 搜索分类切换（歌曲/专辑/歌手/歌单） |
 | `j/k` `↑/↓` `PgUp/PgDn` `g/G` | 列表导航 |
-| `Enter` | 播放（当前列表从这首起顺序播放）/ 打开 |
+| `Enter` | 播放（当前列表从这首起顺序播放）/ 打开；历史页重新播放选中歌曲 |
 | `a` / `A` | 加入队列 / 作为下一首 |
 | `P` | 整页（专辑/歌单/列表）从头播放 |
 | `Tab` | 主面板 ⇄ 队列 |
@@ -140,7 +155,7 @@ enabled = true
 [keys]           # 全局键位可重映射（列表内导航键固定）
 # next = "b"     # 动作名: quit/search/library/help/focus/play_pause/mute/next/
 # vol_up = "]"   #   prev/seek_back/seek_fwd/vol_down/vol_up/repeat/radio/
-                 #   shuffle/lyrics/restart_player
+                 #   shuffle/lyrics/restart_player/history
 ```
 
 日志：`%APPDATA%\ytbm-tui\data\ytbm-tui.log`（TUI 模式下所有诊断信息写入文件）。

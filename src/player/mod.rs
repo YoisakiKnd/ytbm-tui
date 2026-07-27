@@ -10,7 +10,11 @@ use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub enum PlayerCmd {
-    /// Load and play a YouTube Music track by videoId.
+    /// Load and play a media URL.
+    ///
+    /// Normally a direct audio-stream URL resolved by the API layer. A
+    /// `watch?v=` URL also works and makes mpv fall back to its yt-dlp hook,
+    /// which is what happens when our own resolution fails.
     Load(String),
     TogglePause,
     ToggleMute,
@@ -100,9 +104,13 @@ async fn player_task(
 
     while let Some(cmd) = cmd_rx.recv().await {
         let result = match cmd {
-            PlayerCmd::Load(video_id) => {
-                let url = format!("https://music.youtube.com/watch?v={video_id}");
-                info!("loadfile {url}");
+            PlayerCmd::Load(url) => {
+                // Stream URLs carry credentials in the query string - log the
+                // origin only, never the full URL.
+                info!(
+                    "loadfile {}",
+                    url.split_once('?').map_or(url.as_str(), |(base, _)| base)
+                );
                 mpv.command(json!(["loadfile", url, "replace"])).await
             }
             PlayerCmd::TogglePause => mpv.command(json!(["cycle", "pause"])).await,

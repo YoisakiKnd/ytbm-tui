@@ -6,9 +6,11 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::api::models::Track;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RepeatMode {
     #[default]
     Off,
@@ -102,6 +104,15 @@ impl Queue {
         Some(start)
     }
 
+    pub fn restore(&mut self, tracks: Vec<Track>, current: usize, repeat: RepeatMode) -> bool {
+        if tracks.is_empty() || current >= tracks.len() {
+            return false;
+        }
+        self.items = tracks;
+        self.current = Some(current);
+        self.repeat = repeat;
+        true
+    }
     /// Insert right after current without moving the cursor.
     pub fn play_next(&mut self, track: Track) {
         self.insert_after_current(track);

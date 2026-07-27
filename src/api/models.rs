@@ -1,7 +1,9 @@
 //! Shared music domain models - deliberately independent of any backend
 //! (rustypipe today, an authenticated client later).
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub video_id: String,
     pub title: String,
@@ -13,7 +15,7 @@ pub struct Track {
     pub cover_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlbumSummary {
     pub id: String,
     pub title: String,
@@ -21,13 +23,13 @@ pub struct AlbumSummary {
     pub year: Option<u16>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtistSummary {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistSummary {
     pub id: String,
     pub title: String,

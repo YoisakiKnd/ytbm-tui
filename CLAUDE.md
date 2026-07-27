@@ -28,7 +28,8 @@ cargo test --all-targets
 CI 在 Windows/Linux/macOS 三平台跑。发布：推 `v*` 标签即触发 `release.yml`
 交叉构建四个产物并自动建 GitHub Release，**不要手工传附件**。
 
-运行依赖外部程序：`winget install mpv yt-dlp`（mpv 必需，yt-dlp 用于解析播放地址）。
+运行依赖外部程序：`winget install mpv`（必需，音频引擎）。yt-dlp **可选**，只用于
+浏览器 Cookie 导入，以及自己解析播放地址失败时的兜底。
 
 ## 架构要点
 
@@ -36,9 +37,19 @@ CI 在 Windows/Linux/macOS 三平台跑。发布：推 `v*` 标签即触发 `rel
   汇入 `AppEvent` mpsc 通道，主循环逐个应用后重绘。任何网络/IPC 都必须
   `tokio::spawn` 后经通道回流，**严禁阻塞主循环**。
 - **播放**：`player/mpv_ipc.rs` spawn `mpv --no-video --idle` 子进程，JSON IPC
-  （Windows 命名管道 `\\.\pipe\ytbm-mpv-{pid}`）。播放地址不自己解析——把
-  `https://music.youtube.com/watch?v=<id>` 直接交给 mpv 的 yt-dlp hook。
-  曲目结束只认 `end-file` 事件的 `reason=eof`；`stop/quit` 是我们自己触发的，忽略。
+  （Windows 命名管道 `\\.\pipe\ytbm-mpv-{pid}`）。曲目结束只认 `end-file` 事件的
+  `reason=eof`；`stop/quit` 是我们自己触发的，忽略。
+- **播放地址自己解析**（不再走 mpv 的 yt-dlp hook）：`MusicApi::stream_url` 用
+  rustypipe 的 `player()` + `select_audio_stream()` 拿直链。rustypipe 无 botguard
+  时默认客户端顺序是 `[Ios, Tv]`，两者 `needs_po_token()` 均为 false，所以**不需要
+  PO Token**；`Ios` 还 `needs_deobf() == false`，常规路径连 base.js 解混淆都不跑。
+  这条路砍掉了 yt-dlp 和它要求的 deno/node 两层外部依赖。
+  解析在 `start_track` 里 spawn，经 `ApiMsg::StreamResolved` 回流——**必须比对
+  `current_video_id`**，否则用户切歌后迟到的结果会劫持播放。解析失败则回退
+  `watch?v=` URL 交给 mpv 的 hook（yt-dlp 装了才有用）。
+  ⚠️ 直链 query string 里带凭据，**不能整条进日志**，只记 host。
+  ⚠️ YouTube 正在推行 PO Token 强制化。若 `Tv`/`Ios` 也被关上，就只能靠
+  `rustypipe-botguard`（内嵌 Deno + JSDOM 的独立 CLI），外部依赖会回来。
 - **队列权威在 Rust 侧**（`player/queue.rs`，纯逻辑有单测）：一次只给 mpv 一个
   loadfile，结束后由 App 决定下一首。
 - **元数据**：`api/` 层 `MusicApi` trait 隔离后端；实现用 rustypipe。

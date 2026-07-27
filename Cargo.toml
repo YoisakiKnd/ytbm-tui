@@ -2,7 +2,7 @@
 name = "ytbm-tui"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight YouTube Music TUI client (ad-free playback via mpv + yt-dlp)"
+description = "Lightweight YouTube Music TUI client (ad-free playback via mpv)"
 license = "GPL-3.0-only"
 
 [dependencies]
@@ -27,8 +27,14 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # pkg-config, which Windows does not have — the built-in halfblock renderer
 # covers the same fallback role.
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+aes-gcm = "0.11.0"
+base64 = "0.23.0"
 
 [profile.release]
 lto = true
 strip = true
 codegen-units = 1
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }

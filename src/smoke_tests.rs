@@ -69,6 +69,51 @@ async fn radio_from_track() {
     println!("radio: {} tracks, first: {}", radio.len(), radio[0].title);
 }
 
+/// The in-process replacement for mpv's yt-dlp hook: resolve a stream URL and
+/// prove it is actually fetchable by pulling the first bytes with a Range
+/// request. A URL that resolves but 403s would otherwise look like success.
+///
+/// The URL carries credentials in its query string, so only the host and the
+/// response status are printed.
+#[tokio::test]
+#[ignore]
+async fn resolve_and_fetch_stream() {
+    let a = api();
+    let results = a
+        .search("Never Gonna Give You Up", SearchKind::Songs)
+        .await
+        .expect("search failed");
+    let track = &results.tracks[0];
+    let url = a
+        .stream_url(&track.video_id)
+        .await
+        .expect("stream resolution failed");
+    assert!(url.starts_with("https://"), "not an https URL");
+
+    let resp = http()
+        .get(&url)
+        .header("Range", "bytes=0-65535")
+        .send()
+        .await
+        .expect("stream request failed");
+    let status = resp.status();
+    let host = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let bytes = resp.bytes().await.expect("reading stream body failed");
+    println!(
+        "stream for {}: host={host} status={status} got {} bytes",
+        track.video_id,
+        bytes.len()
+    );
+    assert!(
+        status.is_success(),
+        "stream URL not playable: HTTP {status}"
+    );
+    assert!(!bytes.is_empty(), "stream returned no data");
+}
+
 #[tokio::test]
 #[ignore]
 async fn yt_plain_lyrics() {
@@ -115,33 +160,30 @@ async fn lrclib_synced_lyrics() {
     }
 }
 
-/// Structural check of the browser-import plumbing: detection finds real
-/// profiles and yt-dlp export yields YouTube cookie lines. Never prints
-/// cookie material - counts and booleans only.
+/// Structural check of the native browser-import plumbing: detection finds
+/// real profiles and reading them yields YouTube cookies. Never prints cookie
+/// material - counts and booleans only.
 #[tokio::test]
 #[ignore]
 async fn browser_cookie_import_plumbing() {
-    let browsers = crate::browser_login::detect();
+    let browsers = crate::browser_cookies::detect();
     println!("detected {} browser profile(s):", browsers.len());
     for b in &browsers {
-        println!("  {}", b.display);
+        println!("  {} [{:?}]", b.display, b.store);
     }
     assert!(!browsers.is_empty(), "no browsers detected");
 
-    let Some(ytdlp) = crate::config::resolve_tool("yt-dlp", "yt-dlp", "yt-dlp") else {
-        panic!("yt-dlp not found");
-    };
     let work = std::env::temp_dir().join("ytbm-tui-smoke");
 
-    // export_cookies returns a ready-to-send Cookie header, and only
-    // succeeds when the profile actually carries a YouTube credential.
+    // read_cookies returns a ready-to-send Cookie header, and only succeeds
+    // when the profile actually carries a YouTube credential.
     let mut any_usable = false;
     for b in &browsers {
-        match crate::browser_login::export_cookies(&ytdlp, &b.spec, &work).await {
+        match crate::browser_cookies::read_cookies(b, &work) {
             Ok(header) => {
                 assert!(
                     crate::browser_login::has_auth_credential(&header),
-                    "export succeeded without an auth credential"
+                    "read succeeded without an auth credential"
                 );
                 println!(
                     "  {} → {} cookies, credential ok",
@@ -161,21 +203,20 @@ async fn browser_cookie_import_plumbing() {
         any_usable,
         "no browser profile yielded a usable YouTube credential"
     );
-    // The exporter must not leave anything behind.
+    // The reader must not leave its temporary DB copies behind.
     let leftovers: Vec<_> = std::fs::read_dir(&work)
         .map(|it| {
             it.filter_map(Result::ok)
                 .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("cookies-import")
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with("ff-cookies") || n.starts_with("cr-cookies")
                 })
                 .collect()
         })
         .unwrap_or_default();
     assert!(
         leftovers.is_empty(),
-        "cookie export file was not cleaned up"
+        "temporary cookie DB copy was not cleaned up"
     );
 }
 
@@ -185,9 +226,6 @@ async fn browser_cookie_import_plumbing() {
 #[tokio::test]
 #[ignore]
 async fn browser_login_authenticates() {
-    let Some(ytdlp) = crate::config::resolve_tool("yt-dlp", "yt-dlp", "yt-dlp") else {
-        panic!("yt-dlp not found");
-    };
     let work = std::env::temp_dir().join("ytbm-tui-smoke");
     let scratch = work.join("auth-check");
     let _ = std::fs::remove_dir_all(&scratch);
@@ -196,8 +234,8 @@ async fn browser_login_authenticates() {
     assert!(!api.is_logged_in(), "fresh profile must start logged out");
 
     let mut authenticated = false;
-    for b in crate::browser_login::detect() {
-        let Ok(cookies) = crate::browser_login::export_cookies(&ytdlp, &b.spec, &work).await else {
+    for b in crate::browser_cookies::detect() {
+        let Ok(cookies) = crate::browser_cookies::read_cookies(&b, &work) else {
             continue;
         };
         match api.login_cookie(&cookies).await {

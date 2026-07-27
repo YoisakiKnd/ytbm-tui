@@ -1,9 +1,12 @@
 mod api;
 mod app;
+mod browser_cookies;
 mod browser_login;
 mod config;
+mod history;
 mod lyrics;
 mod player;
+mod session;
 mod smoke_tests;
 mod sponsorblock;
 mod ui;
@@ -75,8 +78,9 @@ fn main() -> Result<()> {
     result
 }
 
-/// mpv is required (it is the audio engine); yt-dlp missing is a strong
-/// warning (URL resolution will fail) but not fatal to the UI.
+/// mpv is required (it is the audio engine). yt-dlp is optional: stream URLs
+/// are resolved in-process, so it is only used for browser cookie import (and
+/// as mpv's fallback resolver if our own resolution fails).
 /// Both tools are located beyond PATH (scoop/winget dirs) so a terminal
 /// opened before installation still works.
 fn preflight(cfg: &mut config::Config) -> Result<Option<String>> {
@@ -88,20 +92,20 @@ fn preflight(cfg: &mut config::Config) -> Result<Option<String>> {
         None => bail!(
             "未检测到 mpv（已尝试 PATH、scoop、Program Files）。\n\n\
              mpv 是本程序的音频引擎，请先安装：\n\
-             \x20   scoop install mpv yt-dlp   （或 winget install mpv yt-dlp）\n\n\
+             \x20   scoop install mpv   （或 winget install mpv）\n\n\
              若安装在特殊位置，请在配置文件中设置 playback.mpv_path 为完整路径。"
         ),
     }
+    // Absence is not worth a startup toast - the login page explains it in
+    // context, and playback no longer depends on it.
     match config::resolve_tool("yt-dlp", "yt-dlp", "yt-dlp") {
         Some(path) => {
             info!("yt-dlp resolved: {path}");
             cfg.ytdlp_path = Some(path);
-            Ok(None)
         }
-        None => Ok(Some(
-            "未检测到 yt-dlp，无法解析播放地址 - 请运行: scoop install yt-dlp".into(),
-        )),
+        None => info!("yt-dlp not found (optional: browser cookie import only)"),
     }
+    Ok(None)
 }
 
 async fn run(
@@ -124,7 +128,7 @@ async fn run(
         .user_agent(concat!("ytbm-tui/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    let mut app = App::new(
+    let app = App::new(
         cfg,
         player,
         api,
@@ -133,6 +137,9 @@ async fn run(
         picker,
         tx.clone(),
     );
+    let mut app = app;
+    app.restore_session();
+    app.load_history();
     app.on_start();
     match startup_warning {
         Some(w) => app.toast(w),
@@ -158,6 +165,8 @@ async fn run(
 
     // Graceful mpv teardown; kill_on_drop is the safety net.
     app.player.send(player::PlayerCmd::Shutdown);
+    app.save_session();
+    app.save_history();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     info!("clean shutdown");
     Ok(())

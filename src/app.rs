@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -56,6 +56,12 @@ pub enum ApiMsg {
     },
     RadioDone {
         result: Result<Vec<Track>, String>,
+    },
+    /// Audio stream URL resolved for a track (see [`MusicApi::stream_url`]).
+    StreamResolved {
+        video_id: String,
+        attempt: u8,
+        result: Result<String, String>,
     },
     LyricsDone {
         video_id: String,
@@ -116,6 +122,7 @@ pub enum Action {
     Shuffle,
     LyricsToggle,
     RestartPlayer,
+    History,
 }
 
 /// (action, config name, default key)
@@ -138,6 +145,7 @@ const DEFAULT_KEYS: &[(Action, &str, KeyCode)] = &[
     (Action::Shuffle, "shuffle", KeyCode::Char('s')),
     (Action::LyricsToggle, "lyrics", KeyCode::Char('l')),
     (Action::RestartPlayer, "restart_player", KeyCode::Char('R')),
+    (Action::History, "history", KeyCode::Char('H')),
 ];
 
 /// Download and decode album art. Failures are silent - a missing cover
@@ -155,11 +163,11 @@ async fn fetch_cover(http: reqwest::Client, url: String) -> Option<image::Dynami
 
 /// Detected browsers first (the one-keystroke path), then the fallbacks.
 fn login_methods() -> Vec<LoginMethod> {
-    let mut methods: Vec<LoginMethod> = crate::browser_login::detect()
+    let mut methods: Vec<LoginMethod> = crate::browser_cookies::detect()
         .into_iter()
-        .map(|b| LoginMethod::Browser {
-            display: b.display,
-            spec: b.spec,
+        .map(|profile| LoginMethod::Browser {
+            display: profile.display.clone(),
+            profile: Box::new(profile),
         })
         .collect();
     methods.push(LoginMethod::OpenBrowser);
@@ -213,6 +221,7 @@ pub enum MainView {
     /// Full-page player: cover art, metadata and synced lyrics.
     NowPlaying,
     Library,
+    History,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,8 +260,12 @@ pub struct LibraryState {
 /// One row on the login screen.
 #[derive(Debug, Clone)]
 pub enum LoginMethod {
-    /// Import cookies from an installed browser via yt-dlp.
-    Browser { display: String, spec: String },
+    /// Import cookies by reading an installed browser's own cookie database.
+    /// Boxed to keep the enum small - the other variants carry nothing.
+    Browser {
+        display: String,
+        profile: Box<crate::browser_cookies::BrowserProfile>,
+    },
     /// Open music.youtube.com so the user can sign in first.
     OpenBrowser,
     /// Fall back to pasting a cookie / cookies.txt path.
@@ -386,7 +399,7 @@ pub struct CoverState {
 pub struct PlaybackState {
     pub current_title: Option<String>,
     pub loading: bool,
-    /// Seconds spent in the loading state (yt-dlp resolution feedback).
+    /// Seconds spent in the loading state (stream-resolution feedback).
     pub loading_secs: f32,
     pub time_pos: f64,
     pub duration: f64,
@@ -432,9 +445,12 @@ pub struct App {
     picker: Option<ratatui_image::picker::Picker>,
     /// The track being shown on the now-playing page.
     pub now_playing: Option<Track>,
+    pub history: crate::history::PlaybackHistory,
     sponsor_video_id: String,
     sponsor_segments: Vec<Segment>,
     current_video_id: Option<String>,
+    stream_attempt: u8,
+    resume_position: Option<f64>,
     pub help_visible: bool,
     search_seq: u64,
     browse_seq: u64,
@@ -524,9 +540,12 @@ impl App {
             },
             picker,
             now_playing: None,
+            history: crate::history::PlaybackHistory::default(),
             sponsor_video_id: String::new(),
             sponsor_segments: Vec::new(),
             current_video_id: None,
+            stream_attempt: 0,
+            resume_position: None,
             help_visible: false,
             search_seq: 0,
             browse_seq: 0,
@@ -555,6 +574,53 @@ impl App {
             None => (1, 2),
         };
         ((cols as u32 * fw + fh / 2) / fh).max(1) as u16
+    }
+
+    pub fn restore_session(&mut self) {
+        let path = self.session_path();
+        let Ok(Some(saved)) = crate::session::SavedSession::load(&path) else {
+            return;
+        };
+        let Some(current) = saved.current else {
+            return;
+        };
+        if self.queue.restore(saved.tracks, current, saved.repeat) {
+            self.radio_on = saved.radio_on;
+            self.queue_selected = current;
+            self.resume_position = (saved.position > 3.0).then_some(saved.position);
+            self.toast("已恢复上次队列，按 Enter 继续播放");
+        }
+    }
+
+    fn session_path(&self) -> std::path::PathBuf {
+        self.data_dir.join("playback-session.json")
+    }
+
+    pub fn save_session(&self) {
+        let Some(saved) =
+            crate::session::SavedSession::from_queue(&self.queue, self.pb.time_pos, self.radio_on)
+        else {
+            return;
+        };
+        if let Err(e) = saved.save(&self.session_path()) {
+            tracing::warn!("{e:#}");
+        }
+    }
+
+    pub fn load_history(&mut self) {
+        match crate::history::PlaybackHistory::load(&self.data_dir.join("playback-history.json")) {
+            Ok(history) => self.history = history,
+            Err(e) => tracing::warn!("{e:#}"),
+        }
+    }
+
+    pub fn save_history(&self) {
+        if let Err(e) = self
+            .history
+            .save(&self.data_dir.join("playback-history.json"))
+        {
+            tracing::warn!("{e:#}");
+        }
     }
 
     /// Kick off startup fetches (home recommendations).
@@ -612,13 +678,35 @@ impl App {
 
     fn start_track(&mut self, track: Track) {
         self.now_playing = Some(track.clone());
+        self.history.record(track.clone());
         self.pb.current_title = Some(format!("{} - {}", track.title, track.artists));
         self.pb.loading = true;
         self.pb.loading_secs = 0.0;
         self.pb.time_pos = 0.0;
         self.pb.duration = track.duration_secs.map(f64::from).unwrap_or(0.0);
+        self.resume_position = None;
         self.current_video_id = Some(track.video_id.clone());
-        self.player.send(PlayerCmd::Load(track.video_id.clone()));
+        self.stream_attempt = 0;
+
+        // Resolve the stream URL in-process rather than letting mpv shell out
+        // to yt-dlp. The result is applied in `ApiMsg::StreamResolved`, which
+        // drops it if the user has moved on to another track meanwhile.
+        {
+            let api = self.api.clone();
+            let tx = self.tx.clone();
+            let vid = track.video_id.clone();
+            tokio::spawn(async move {
+                let result = tokio::time::timeout(Duration::from_secs(20), api.stream_url(&vid))
+                    .await
+                    .map_err(|_| "解析播放地址超时".to_string())
+                    .and_then(|result| result.map_err(|e| format!("{e:#}")));
+                let _ = tx.send(AppEvent::Api(ApiMsg::StreamResolved {
+                    video_id: vid,
+                    attempt: 0,
+                    result,
+                }));
+            });
+        }
 
         // Lyrics for the new track.
         self.lyrics = LyricsState {
@@ -728,6 +816,10 @@ impl App {
                 self.pb.loading = false;
                 self.pb.loading_secs = 0.0;
                 self.pb.time_pos = 0.0;
+                if let Some(position) = self.resume_position.take() {
+                    self.player.send(PlayerCmd::SeekAbs(position));
+                    self.pb.time_pos = position;
+                }
             }
             PlayerEvent::TimePos(t) => {
                 self.pb.time_pos = t;
@@ -945,6 +1037,60 @@ impl App {
                     }
                 }
             }
+            ApiMsg::StreamResolved {
+                video_id,
+                attempt,
+                result,
+            } => {
+                if self.current_video_id.as_deref() != Some(video_id.as_str())
+                    || attempt != self.stream_attempt
+                {
+                    return;
+                }
+                let url = match result {
+                    Ok(url) => url,
+                    Err(_e) if self.stream_attempt < 2 => {
+                        self.stream_attempt += 1;
+                        self.toast(format!(
+                            "解析播放地址失败，正在重试 ({}/2)",
+                            self.stream_attempt
+                        ));
+                        let api = self.api.clone();
+                        let tx = self.tx.clone();
+                        let retry_id = video_id.clone();
+                        let retry_attempt = self.stream_attempt;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(20),
+                                api.stream_url(&retry_id),
+                            )
+                            .await
+                            .map_err(|_| "解析播放地址超时".to_string())
+                            .and_then(|result| result.map_err(|e| format!("{e:#}")));
+                            let _ = tx.send(AppEvent::Api(ApiMsg::StreamResolved {
+                                video_id: retry_id,
+                                attempt: retry_attempt,
+                                result,
+                            }));
+                        });
+                        return;
+                    }
+                    Err(e) => {
+                        if self.config.ytdlp_path.is_none() {
+                            tracing::warn!("stream resolution failed, no ytdl fallback: {e}");
+                            self.pb.loading = false;
+                            self.toast(format!("解析播放地址失败，跳到下一首: {e}"));
+                            let adv = self.queue.next_manual();
+                            self.advance(adv);
+                            return;
+                        }
+                        tracing::warn!("stream resolution failed, falling back to ytdl hook: {e}");
+                        format!("https://music.youtube.com/watch?v={video_id}")
+                    }
+                };
+                self.player.send(PlayerCmd::Load(url));
+            }
             ApiMsg::LyricsDone { video_id, data } => {
                 if video_id == self.lyrics.video_id {
                     self.lyrics.data = data;
@@ -1084,6 +1230,7 @@ impl App {
                 MainView::NowPlaying => self.on_lyrics_key(key),
                 MainView::Home => self.on_home_key(key),
                 MainView::Library => self.on_library_key(key),
+                MainView::History => self.on_history_key(key),
             },
         }
     }
@@ -1152,6 +1299,10 @@ impl App {
                 if !self.pb.alive {
                     self.player_restart_requested = true;
                 }
+            }
+            Action::History => {
+                self.focus = Focus::Main;
+                self.main_view = MainView::History;
             }
         }
     }
@@ -1722,6 +1873,26 @@ impl App {
         }
     }
 
+    fn on_history_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.library.selected = self.library.selected.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.library.selected =
+                    (self.library.selected + 1).min(self.history.entries().len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = self.history.entries().get(self.library.selected) {
+                    self.queue.set_context(vec![entry.track.clone()], 0);
+                    self.start_track_at(0);
+                }
+            }
+            KeyCode::Esc => self.main_view = MainView::Home,
+            _ => {}
+        }
+    }
+
     fn on_library_key(&mut self, key: KeyEvent) {
         if !self.api.is_logged_in() {
             let len = self.login.methods.len();
@@ -1773,29 +1944,28 @@ impl App {
                     Err(e) => self.toast(format!("打开浏览器失败: {e}")),
                 }
             }
-            LoginMethod::Browser { display, spec } => {
-                let Some(ytdlp) = self.config.ytdlp_path.clone() else {
-                    self.toast("未检测到 yt-dlp，无法从浏览器导入，请改用手动粘贴");
-                    return;
-                };
+            LoginMethod::Browser { display, profile } => {
                 self.login.busy = true;
                 self.toast(format!("正在从 {display} 读取登录信息.."));
                 let api = self.api.clone();
                 let tx = self.tx.clone();
                 let work_dir = self.data_dir.clone();
                 tokio::spawn(async move {
-                    // The cookie text stays inside this task: exported,
-                    // handed to the API, then dropped. Never logged.
-                    let result = match crate::browser_login::export_cookies(
-                        &ytdlp, &spec, &work_dir,
-                    )
-                    .await
-                    {
-                        Ok(cookies) => api
+                    // The cookie text stays inside this task: read, handed to
+                    // the API, then dropped. Never logged.
+                    // Reading is blocking file I/O, so keep it off the async
+                    // worker threads.
+                    let read = tokio::task::spawn_blocking(move || {
+                        crate::browser_cookies::read_cookies(&profile, &work_dir)
+                    })
+                    .await;
+                    let result = match read {
+                        Ok(Ok(cookies)) => api
                             .login_cookie(&cookies)
                             .await
                             .map_err(|e| format!("{e:#}")),
-                        Err(e) => Err(format!("{e:#}")),
+                        Ok(Err(e)) => Err(format!("{e:#}")),
+                        Err(e) => Err(format!("读取任务失败: {e}")),
                     };
                     let _ = tx.send(AppEvent::Api(ApiMsg::LoginDone { result }));
                 });

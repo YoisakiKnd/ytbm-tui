@@ -1,4 +1,5 @@
 mod browse;
+mod history;
 mod home;
 mod library;
 mod now_playing;
@@ -32,10 +33,11 @@ pub struct UiLayout {
 
 /// Top-level destinations, with the key that reaches them. Showing the keys
 /// in the bar is what makes them discoverable — there is no menu otherwise.
-pub const NAV_TABS: [(&str, &str, MainView); 4] = [
+pub const NAV_TABS: [(&str, &str, MainView); 5] = [
     ("首页", "Esc", MainView::Home),
     ("搜索", "/", MainView::Search),
     ("音乐库", "L", MainView::Library),
+    ("历史", "H", MainView::History),
     ("正在播放", "l", MainView::NowPlaying),
 ];
 
@@ -340,6 +342,7 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect, layout: &mut UiLayout) {
         MainView::Browse => " 浏览 ",
         MainView::NowPlaying => " 正在播放 ",
         MainView::Library => " 音乐库 ",
+        MainView::History => " 播放历史 ",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -378,6 +381,11 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect, layout: &mut UiLayout) {
         MainView::NowPlaying => now_playing::draw(f, app, inner),
         MainView::Library => {
             if let Some(hit) = library::draw(f, app, inner) {
+                layout.main_list = Some((MainListKind::Library, hit.0, hit.1));
+            }
+        }
+        MainView::History => {
+            if let Some(hit) = history::draw(f, app, inner) {
                 layout.main_list = Some((MainListKind::Library, hit.0, hit.1));
             }
         }

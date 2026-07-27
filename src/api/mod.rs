@@ -23,6 +23,12 @@ pub trait MusicApi: Send + Sync {
     async fn playlist(&self, id: &str) -> Result<PlaylistDetail>;
     /// Radio ("up next" autoplay) continuation seeded by a track.
     async fn radio(&self, video_id: &str) -> Result<Vec<Track>>;
+    /// Resolve a directly playable audio stream URL for `video_id`.
+    ///
+    /// Doing this in-process replaces mpv's yt-dlp hook, which in turn needs
+    /// an external JS runtime (deno/node) for YouTube's challenges.
+    /// The returned URL is short-lived - resolve it right before playback.
+    async fn stream_url(&self, video_id: &str) -> Result<String>;
     /// Plain-text lyrics from YT Music (fallback source; LRCLIB is primary).
     async fn plain_lyrics(&self, video_id: &str) -> Result<Option<String>>;
 
